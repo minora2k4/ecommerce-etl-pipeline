@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Env
+.env
+.env.*
+venv/
+.venv/
+
+# Airflow
+airflow.db
+logs/
+
+# Data
+data/
+datasets/
+
+# Spark
+spark-warehouse/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+cmd.txt
