@@ -5,10 +5,8 @@ __pycache__/
 *.pyd
 
 # Env
-.env
-.env.*
+env/
 venv/
-.venv/
 
 # Airflow
 airflow.db
@@ -22,7 +20,6 @@ datasets/
 spark-warehouse/
 
 # IDE
-.vscode/
 .idea/
 
 # OS

@@ -87,6 +87,8 @@ services:
           airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true"
 
   airflow-webserver:
+    env_file:
+      - ./env/airflow.env
     build:
       context: ./airflow
       dockerfile: Dockerfile
@@ -111,6 +113,8 @@ services:
       retries: 5
 
   airflow-scheduler:
+    env_file:
+      - ./env/airflow.env
     build:
       context: ./airflow
       dockerfile: Dockerfile
