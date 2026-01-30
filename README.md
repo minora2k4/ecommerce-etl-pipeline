@@ -31,6 +31,7 @@ ClickHouse (Analytics Database)
 ### Step 1: Start the System
 
 ```bash
+git clone https://github.com/minora2k4/ecommerce-etl-pipeline
 cd ecommerce-pipeline
 docker-compose up -d
 ```
