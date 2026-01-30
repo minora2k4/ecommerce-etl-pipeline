@@ -16,11 +16,12 @@ logs/
 data/
 datasets/
 
-# Spark
-spark-warehouse/
-
 # IDE
 .idea/
+
+spark/checkpoint/
+
+
 
 # OS
 .DS_Store

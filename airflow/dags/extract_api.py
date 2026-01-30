@@ -1,5 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.utils.dates import days_ago
 from datetime import datetime, timedelta
 import json
 import time
@@ -12,10 +13,14 @@ KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
 
 
 def create_kafka_producer():
+    """Create Kafka producer with retry logic"""
     return KafkaProducer(
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        retries=5
+        retries=5,
+        max_in_flight_requests_per_connection=5,
+        request_timeout_ms=30000,
+        api_version=(0, 10, 1)
     )
 
 
@@ -29,7 +34,7 @@ def crawl_dummyjson():
     response = requests.get(
         "https://dummyjson.com/products",
         params={
-            "limit": 50,  # Tăng lên 50 items
+            "limit": 80,  # số items
             "skip": skip,
             "select": "title,price,category,brand,rating,stock,thumbnail"
         },
@@ -42,14 +47,14 @@ def crawl_dummyjson():
     for item in data["products"]:
         records.append({
             "source": "dummyjson",
-            "product_id": item["id"],
+            "product_id": str(item["id"]),  # Convert to string for consistency
             "name": item["title"],
             "price": float(item["price"]),
             "currency": "USD",
             "category": item.get("category", "unknown"),
             "brand": item.get("brand", "unknown"),
-            "rating": item.get("rating", 0),
-            "stock": item.get("stock", 0),
+            "rating": float(item.get("rating", 0)),
+            "stock": int(item.get("stock", 0)),
             "thumbnail": item.get("thumbnail", ""),
             "timestamp": time.time()
         })
@@ -62,7 +67,7 @@ def crawl_fakestoreapi():
     FakeStoreAPI - Free fake REST API for e-commerce
     Không cần đăng ký hoặc API key
     Có 20 sản phẩm với đầy đủ thông tin
-    Strategy: Lấy tất cả products và duplicate với variation để đạt 50 records
+    Strategy: Lấy tất cả products và duplicate với variation để đạt 100 records
     """
     response = requests.get(
         "https://fakestoreapi.com/products",
@@ -73,30 +78,30 @@ def crawl_fakestoreapi():
 
     records = []
 
-    # Lặp lại products để đạt 50 records với slight variations
-    for round_num in range(3):  # 3 rounds = 20x3 = 60 products
+    # Lặp lại products để đạt 100 records với slight variations
+    for round_num in range(6):  # 6 rounds
         for item in products:
-            if len(records) >= 50:  # Giới hạn 50 records
+            if len(records) >= 100:  # Giới hạn 100 records
                 break
 
             records.append({
                 "source": "fakestoreapi",
-                "product_id": f"{item['id']}_r{round_num}",  # Unique ID mỗi round
+                "product_id": f"{item['id']}_r{round_num}",  # Unique ID mỗi round (already string)
                 "name": item["title"],
                 "price": float(item["price"]) * (1 + round_num * 0.05),  # Price variation
                 "currency": "USD",
                 "category": item.get("category", "unknown"),
-                "rating": item.get("rating", {}).get("rate", 0),
-                "rating_count": item.get("rating", {}).get("count", 0),
+                "rating": float(item.get("rating", {}).get("rate", 0)),
+                "rating_count": int(item.get("rating", {}).get("count", 0)),
                 "description": item.get("description", ""),
                 "image": item.get("image", ""),
                 "timestamp": time.time()
             })
 
-        if len(records) >= 50:
+        if len(records) >= 100:
             break
 
-    return records[:50]  # Đảm bảo đúng 50 records
+    return records[:100]
 
 
 def crawl_platzi_fakestore():
@@ -104,11 +109,11 @@ def crawl_platzi_fakestore():
     Platzi Fake Store API - Free fake REST API
     Không cần đăng ký hoặc API key
     Hỗ trợ filtering và có nhiều sản phẩm
-    Strategy: Lấy nhiều products và filter để đạt đúng 50 valid records
+    Strategy: Lấy nhiều products và filter để đạt đúng 20 valid records
     """
     response = requests.get(
         "https://api.escuelajs.co/api/v1/products",
-        params={"offset": 0, "limit": 100},  # Lấy 100 để filter xuống 50
+        params={"offset": 0, "limit": 150},
         timeout=10
     )
     response.raise_for_status()
@@ -120,25 +125,26 @@ def crawl_platzi_fakestore():
         if not item.get("title") or item.get("price", 0) <= 0:
             continue
 
-        if len(records) >= 50:  # Dừng khi đạt 50 records
+        if len(records) >= 20:  # Dừng khi đạt 20 records
             break
 
         records.append({
             "source": "platzi",
-            "product_id": item["id"],
+            "product_id": str(item["id"]),  # Convert to string
             "name": item["title"],
             "price": float(item["price"]),
             "currency": "USD",
-            "category": item.get("category", {}).get("name", "unknown"),
+            "category": item.get("category", {}).get("name", "unknown") if isinstance(item.get("category"), dict) else "unknown",
             "description": item.get("description", ""),
-            "images": item.get("images", []),
+            "images": item.get("images", []) if isinstance(item.get("images"), list) else [],
             "timestamp": time.time()
         })
 
-    return records[:50]  # Đảm bảo đúng 50 records
+    return records[:20]
 
 
 def extract_and_send():
+    """Main extraction and sending function"""
     producer = create_kafka_producer()
     all_records = []
 
@@ -149,54 +155,138 @@ def extract_and_send():
         ("Platzi Fake Store", crawl_platzi_fakestore)
     ]
 
-    # Sử dụng ThreadPoolExecutor để crawl song song (NHANH NHẤT)
-    start_time = time.time()
-    print(f"Starting parallel crawl from {len(crawl_functions)} APIs...")
+    # Tracking metrics cho từng API
+    api_metrics = {}
+
+    # Sử dụng ThreadPoolExecutor để crawl song song
+    overall_start = time.time()
+    print("=" * 70)
+    print(f"--->Starting parallel crawl from {len(crawl_functions)} APIs...")
+    print("=" * 70)
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        # Submit tất cả tasks đồng thời
-        future_to_api = {
-            executor.submit(func): name
-            for name, func in crawl_functions
-        }
+        # Submit tất cả tasks đồng thời và track start time
+        future_to_api = {}
+        for name, func in crawl_functions:
+            future = executor.submit(func)
+            future_to_api[future] = {
+                "name": name,
+                "start_time": time.time()
+            }
 
         # Collect results khi hoàn thành
         for future in as_completed(future_to_api):
-            api_name = future_to_api[future]
+            api_info = future_to_api[future]
+            api_name = api_info["name"]
+            start_time = api_info["start_time"]
+
             try:
                 records = future.result()
-                all_records.extend(records)
-                print(f"✓ {api_name}: {len(records)} products")
-            except Exception as e:
-                print(f"✗ {api_name} error: {str(e)}")
+                end_time = time.time()
+                elapsed = end_time - start_time
 
-    elapsed_time = time.time() - start_time
-    print(f"Crawled {len(all_records)} total records in {elapsed_time:.2f} seconds")
+                all_records.extend(records)
+                api_metrics[api_name] = {
+                    "records": len(records),
+                    "time": elapsed,
+                    "status": "success"
+                }
+
+                print(f"✅ {api_name}:")
+                print(f"   └─ Records: {len(records)} products")
+                print(f"   └─ Time: {elapsed:.2f}s")
+                print(f"   └─ Speed: {len(records) / elapsed:.1f} products/sec")
+
+            except Exception as e:
+                end_time = time.time()
+                elapsed = end_time - start_time
+
+                api_metrics[api_name] = {
+                    "records": 0,
+                    "time": elapsed,
+                    "status": "failed",
+                    "error": str(e)
+                }
+
+                print(f"❌ {api_name}:")
+                print(f"   └─ Error: {str(e)}")
+                print(f"   └─ Time: {elapsed:.2f}s")
+
+    overall_elapsed = time.time() - overall_start
+
+    # Print summary statistics
+    print("=" * 70)
+    print("CRAWL SUMMARY:")
+    print("=" * 70)
+
+    total_records = len(all_records)
+    successful_apis = sum(1 for m in api_metrics.values() if m["status"] == "success")
+
+    for api_name, metrics in api_metrics.items():
+        status_icon = "✅" if metrics["status"] == "success" else "❌"
+        print(f"{status_icon} {api_name:20} | {metrics['records']:3} records | {metrics['time']:5.2f}s")
+
+    print("-" * 70)
+    print(f"Total Records:     {total_records}")
+    print(f"Total Time:        {overall_elapsed:.2f}s")
+    print(f"Success Rate:      {successful_apis}/{len(crawl_functions)} APIs")
+    print(f"Overall Speed:     {total_records / overall_elapsed:.1f} products/sec")
+    print(f"Parallel Speedup:  ~{sum(m['time'] for m in api_metrics.values()) / overall_elapsed:.1f}x faster")
+    print("=" * 70)
 
     # Send tất cả records to Kafka
-    print(f"Sending {len(all_records)} records to Kafka...")
+    if total_records == 0:
+        print("⚠️  No records to send to Kafka")
+        producer.close()
+        return
+
+    kafka_start = time.time()
+    print(f"-->Sending {total_records} records to Kafka topic '{KAFKA_TOPIC}'...")
+
+    sent_count = 0
+    failed_count = 0
+
     for record in all_records:
-        producer.send(KAFKA_TOPIC, value=record)
+        try:
+            future = producer.send(KAFKA_TOPIC, value=record)
+            # Wait for acknowledgment with timeout
+            future.get(timeout=10)
+            sent_count += 1
+        except Exception as e:
+            failed_count += 1
+            print(f"Failed to send record: {e}")
 
     producer.flush()
     producer.close()
-    print("Done!")
+
+    kafka_elapsed = time.time() - kafka_start
+    print(f"Kafka send completed in {kafka_elapsed:.2f}s")
+    print(f"   └─ Sent: {sent_count}/{total_records} messages")
+    print(f"   └─ Failed: {failed_count}")
+    print(f"   └─ Speed: {sent_count / kafka_elapsed:.1f} msgs/sec")
+
+    total_pipeline_time = time.time() - overall_start
+    print("=" * 70)
+    print(f"PIPELINE COMPLETED in {total_pipeline_time:.2f}s")
+    print("=" * 70)
 
 
 default_args = {
     "owner": "airflow",
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
-    "start_date": datetime(2024, 1, 1),
+    "start_date": datetime(2026, 1, 30),
     "email_on_failure": False,
     "email_on_retry": False,
+    "depends_on_past": False,
 }
 
 with DAG(
         dag_id="extract_ecommerce_api_to_kafka",
         default_args=default_args,
         description="Crawl products from 3 APIs in parallel every 3 minutes",
-        schedule_interval="*/3 * * * *",  # Chạy mỗi 3 phút
+        schedule_interval="*/3 * * * *",  # Changed from */1 to */3 (every 3 minutes)
+        start_date=days_ago(1),
         catchup=False,
         max_active_runs=1,
         tags=["api", "kafka", "ecommerce", "free-api", "parallel"]
@@ -204,5 +294,5 @@ with DAG(
     extract_task = PythonOperator(
         task_id="extract_and_send_to_kafka",
         python_callable=extract_and_send,
-        execution_timeout=timedelta(minutes=10), # Giới hạn thời gian thực thi
+        execution_timeout=timedelta(minutes=10),
     )
