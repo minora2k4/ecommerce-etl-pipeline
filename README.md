@@ -2,17 +2,8 @@
 
 ## Architecture Overview
 
-```
-APIs (DummyJSON, FakeStoreAPI, Platzi)
-    ↓
-Apache Airflow (Orchestration - every 3 minutes)
-    ↓
-Apache Kafka (Message Queue)
-    ↓
-Apache Spark Streaming (Processing - every 10 seconds)
-    ↓
-ClickHouse (Analytics Database)
-```
+<img width="1026" height="265" alt="image" src="https://github.com/user-attachments/assets/d67a3f50-7c6f-4334-971d-ba97f7bfdcaf" />
+
 
 ## Data Flow
 
